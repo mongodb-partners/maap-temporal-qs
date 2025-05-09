@@ -19,7 +19,7 @@ ServerInstanceProfile="MAAPTemporalServerInstanceProfile"
 IMDSv2LaunchTemplateName="IMDSv2"
 VolumeSize=100 #Disk Storage Space
 
-GIT_REPO_URL="https://github.com/mohammaddaoudfarooqi/maap-temporal-qs"
+GIT_REPO_URL="https://github.com/mongodb-partners/maap-temporal-qs" #GitHub Repository URL
 
 TAG_NAME="MAAP-Temporal-One-Click"
 
