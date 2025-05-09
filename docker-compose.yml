@@ -1,0 +1,58 @@
+services:
+  event-logger:
+    image: public.ecr.aws/s2e1n3u8/maap-temporal-qs-event-logger:latest
+    env_file:
+      - environment/event-logger/.env
+    networks:
+      - temporal-network
+    environment:
+      - PORT=8181
+  ai-memory:
+    image: public.ecr.aws/s2e1n3u8/maap-temporal-qs-ai-memory:latest
+    env_file:
+      - environment/ai-memory/.env
+    depends_on:
+      - event-logger
+    networks:
+      - temporal-network
+    environment:
+      - PORT=8182
+  semantic-cache:
+    image: public.ecr.aws/s2e1n3u8/maap-temporal-qs-semantic-cache:latest
+    env_file:
+      - environment/semantic-cache/.env
+    depends_on:
+      - event-logger
+    networks:
+      - temporal-network
+    environment:
+      - PORT=8183
+  data-loader:
+    image: public.ecr.aws/s2e1n3u8/maap-temporal-qs-data-loader:latest
+    env_file:
+      - environment/data-loader/.env
+    depends_on:
+      - event-logger
+    networks:
+      - temporal-network
+    environment:
+      - PORT=8184
+  host:
+    image: public.ecr.aws/s2e1n3u8/maap-temporal-qs-host:latest
+    env_file:
+      - environment/host/.env
+    depends_on:
+      - event-logger
+      - ai-memory
+      - semantic-cache
+      - data-loader
+    networks:
+      - temporal-network
+    ports:
+      - 7860:7860
+
+networks:
+  temporal-network:
+    driver: bridge
+    name: temporal-network
+    external: true

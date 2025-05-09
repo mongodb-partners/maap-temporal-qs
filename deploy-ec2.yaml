@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation template to deploy an EC2 instance, clone a private Git repo, and set up a MAAP app on Docker.
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair for SSH access.
+    Type: String
+
+  InstanceType:
+    Description: EC2 instance type.
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t2.micro, t3.medium, t3.large, t3.xlarge]
+
+  AMIId:
+    Description: AMI ID for the instance.
+    Type: AWS::EC2::Image::Id
+    Default: ami-005fc0f236362e99f
+
+  SubnetId:
+    Description: Subnet ID to deploy the instance.
+    Type: AWS::EC2::Subnet::Id
+
+  SecurityGroupId:
+    Description: Security Group ID to associate with the instance.
+    Type: AWS::EC2::SecurityGroup::Id
+
+  VolumeSize:
+    Description: Root volume size in GiB.
+    Type: Number
+    Default: 100
+
+  TagName:
+    Description: Name tag for the EC2 instance.
+    Type: String
+    Default: MAAP-Temporal
+
+  IAMInstanceProfile:
+    Description: IAM instance profile ARN.
+    Type: String
+
+  GitRepoURL:
+    Description: HTTP URL for the Git repository.
+    Type: String
+
+  MongoDBClusterName:
+    Type: String
+    Description: The name of the MongoDB Cluster
+    Default: "MongoDBCluster-Temporal"
+
+  MongoDBUserName:
+    Type: String
+    Description: MongoDB User Name
+
+  MongoDBPassword:
+    Type: String
+    Description: MongoDB Password
+
+  APIPUBLICKEY:
+    Type: String
+    Description: MongoDB Atlas API_PUBLIC_KEY
+
+  APIPRIVATEKEY:
+    Type: String
+    Description: MongoDB Atlas API_PRIVATE_KEY
+
+  GROUPID:
+    Type: String
+    Description: MongoDB Atlas GROUP_ID
+
+  AWSRegion:
+    Description: AWS Region for the EC2 instance.
+    Type: String
+    Default: us-east-1
+
+  AvailabilityZone:
+    Type: String
+    Description: EC2 Availability Zone
+
+  TavilyAPIKey:
+    Description: Tavily Web Search API Key.
+    Type: String
+
+  LLMModelID:
+    Description: AI Memory LLM Model ID.
+    Type: String
+    Default: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+
+  EmbeddingModelID:
+    Description: Semantic Cache Embedding Model ID.
+    Type: String
+    Default: amazon.titan-embed-text-v1
+
+  IMDSv2LaunchTemplateName:
+    Description: IMDSv2 Launch Template Name.
+    Type: String
+    Default: IMDSV2
+
+Resources:
+  IMDSv2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Ref IMDSv2LaunchTemplateName
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref IMDSv2LaunchTemplate
+        Version: !GetAtt IMDSv2LaunchTemplate.LatestVersionNumber
+      KeyName: !Ref KeyName
+      ImageId: !Ref AMIId
+      SubnetId: !Ref SubnetId
+      AvailabilityZone: !Ref AvailabilityZone
+      SecurityGroupIds:
+        - !Ref SecurityGroupId
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp2
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Ref TagName
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+
+          LOG_FILE="/home/ubuntu/deployment.log"
+          exec > >(tee -a "$LOG_FILE") 2>&1
+
+          echo "Starting instance initialization at $(date)..."
+
+          update_system() {
+              echo "Updating system packages..."
+              if ! sudo apt update -y; then
+                  echo "System update failed. Continuing..."
+              fi
+          }
+
+          install_packages() {
+              echo "Installing required packages..."
+              if ! sudo apt install -y python3 python3-pip git docker.io docker-compose ksh python3-venv; then
+                  echo "Package installation failed. Continuing..."
+              fi
+          }
+
+          configure_docker() {
+              echo "Configuring Docker..."
+              if ! sudo usermod -aG docker ubuntu; then
+                  echo "Failed to add user to Docker group. Continuing..."
+              fi
+          }
+
+          clone_repository() {
+              echo "Cloning Git repository..."
+              if ! sudo -u ubuntu git clone "${GitRepoURL}" /home/ubuntu/MAAP-Files; then
+                  { echo "Git clone failed.  Exiting."; exit 1; }
+              fi
+              cd /home/ubuntu/MAAP-Files || { echo "MAAP-Files directory not found. Exiting."; exit 1; }
+          }
+
+          setup_main_env_file() {
+              echo "Setting up environment variables..."
+              cat <<EOF > /home/ubuntu/MAAP-Files/.env
+          AWS_REGION=${AWSRegion}
+          API_PUBLIC_KEY=${APIPUBLICKEY}
+          API_PRIVATE_KEY=${APIPRIVATEKEY}
+          GROUP_ID=${GROUPID}
+          TAVILY_API_KEY=${TavilyAPIKey}
+          LLM_MODEL_ID=${LLMModelID}
+          EMBEDDING_MODEL_ID=${EmbeddingModelID}
+          EOF
+          }
+
+          deploy_mongodb() {
+              echo "Deploying MongoDB cluster..."
+              chmod +x mongodb_cluster_manager.ksh || echo "Failed to set executable permission for mongodb_cluster_manager.ksh."
+              if ! ./mongodb_cluster_manager.ksh deploy "${MongoDBClusterName}" "${MongoDBUserName}" "${MongoDBPassword}"; then
+                  { echo  "MongoDB cluster deployment failed. Exiting."; exit 1; }
+              fi
+              echo "Deploying MongoDB Vector Index and inserting data..."
+              chmod +x mongodb_create_vectorindex.ksh || echo "Failed to set executable permission for mongodb_create_vectorindex.ksh."
+              if ! ./mongodb_create_vectorindex.ksh; then
+                  { echo  "MongoDB Vector Index deployment failed. Exiting."; exit 1; }
+              fi
+          }
+
+          # Function to create service folder and its .env file with proper permissions
+          create_service_env() {
+              local service_name=$1
+              local env_vars=$2
+              
+              echo "Creating environment for $service_name service..."
+              # Create directory with explicit permissions
+              mkdir -p "/home/ubuntu/MAAP-Files/environment/$service_name"
+              chmod 755 "/home/ubuntu/MAAP-Files/environment/$service_name"
+              
+              # Create .env file with provided variables
+              echo "$env_vars" > "/home/ubuntu/MAAP-Files/environment/$service_name/.env"
+              
+              # Set permissions on the .env file
+              chmod 644 "/home/ubuntu/MAAP-Files/environment/$service_name/.env"
+              
+              # Ensure ownership is correct (uncomment if running as sudo/root)
+              # chown -R ubuntu:ubuntu "/home/ubuntu/MAAP-Files/environment/$service_name"
+              
+              # Verify the file was created successfully
+              if [ -f "/home/ubuntu/MAAP-Files/environment/$service_name/.env" ]; then
+                  echo "Successfully created .env file for $service_name"
+              else
+                  echo "ERROR: Failed to create .env file for $service_name"
+              fi
+          }
+
+          setup_services_env_files() {
+              # Create main environment directory with appropriate permissions
+              echo "Creating main environment directory..."
+              mkdir -p "/home/ubuntu/MAAP-Files/environment"
+              chmod 755 "/home/ubuntu/MAAP-Files/environment"
+              
+              # Ensure proper ownership (uncomment if running as sudo/root)
+              # chown ubuntu:ubuntu "/home/ubuntu/MAAP-Files/environment"
+              
+              # Read MongoDB URI from existing .env file
+              if [ -f "/home/ubuntu/MAAP-Files/.env" ]; then
+                  MONGODB_URI=$(grep "MONGODB_URI" /home/ubuntu/MAAP-Files/.env | cut -d '=' -f2-)
+                  if [ -z "$MONGODB_URI" ]; then
+                      echo "Warning: MONGODB_URI not found in existing .env file"
+                      # Keep the variable reference if not found
+                      MONGODB_URI=$MONGODB_URI
+                  else
+                      echo "Successfully read MONGODB_URI from existing .env file"
+                  fi
+              else
+                  echo "Warning: /home/ubuntu/MAAP-Files/.env file not found"
+                  # Keep the variable reference if file not found
+                  MONGODB_URI=$MONGODB_URI
+              fi
+              
+              # Create environment for various services
+              create_service_env "ai-memory" "
+          AWS_REGION=${AWSRegion}
+          MONGODB_URI=$MONGODB_URI
+          SUMMARY_MODEL_ID=${LLMModelID}
+          EMBEDDING_MODEL_ID=${EmbeddingModelID}
+          "
+              create_service_env "data-loader" "
+          EMBEDDING_MODEL_ID=${EmbeddingModelID}
+          AWS_REGION=${AWSRegion}
+          "
+              create_service_env "event-logger" "
+          MONGODB_URI=$MONGODB_URI
+          "
+              create_service_env "host" "
+          MONGODB_URI=$MONGODB_URI
+          TAVILY_API_KEY=${TavilyAPIKey}
+          AWS_REGION=${AWSRegion}
+          LLM_MODEL_ID=${LLMModelID}
+          EMBEDDING_MODEL_ID=${EmbeddingModelID}
+          LOGGER_SERVICE_URL=http://event-logger:8181
+          APP_NAME=MAAP-MCP-Host
+          "
+              create_service_env "semantic-cache" "
+          MONGODB_URI=$MONGODB_URI
+          AWS_REGION=${AWSRegion}
+          EMBEDDING_MODEL_ID=${EmbeddingModelID}
+          "
+              
+              echo "Setting proper permissions for all environment files and directories..."
+              find "/home/ubuntu/MAAP-Files/environment" -type d -exec chmod 755 {} \;
+              find "/home/ubuntu/MAAP-Files/environment" -type f -exec chmod 644 {} \;
+              
+              echo "Environment setup complete. Directory structure created with .env files at /home/ubuntu/MAAP-Files/environment/"
+              
+              # List the created files to verify
+              echo "Created environment files:"
+              ls -la /home/ubuntu/MAAP-Files/environment/
+              ls -la /home/ubuntu/MAAP-Files/environment/*/
+              
+              # Debug: Print current user and file ownership
+              echo "Current user: $(whoami)"
+              echo "File ownership:"
+              ls -la "/home/ubuntu/MAAP-Files/environment"
+          }
+          build_docker_images() {
+              echo "Building Docker images..."
+              sudo iptables -A DOCKER-USER -d 169.254.169.254 -j ACCEPT
+              sudo iptables-save
+
+              cd /home/ubuntu/MAAP-Files/MAAP-Temporal || { echo "MAAP-Temporal directory not found. Exiting."; exit 1; }
+              chmod +x build-images.ksh || echo "Failed to set executable permission for build-images.ksh."
+              if ! ./build-images.ksh; then
+                 { echo "Docker image build failed.  Exiting."; exit 1; }
+              fi
+          }
+
+          deploy_services() {
+              echo "Starting Docker services..."
+              
+              if ! docker-compose up -d; then
+                 { echo "Docker Compose failed to start services. Exiting."; exit 1; }
+              fi
+
+          }
+
+          main() {
+              update_system
+              install_packages
+              configure_docker
+              clone_repository
+              setup_main_env_file
+              deploy_mongodb
+              setup_services_env_files
+              build_docker_images
+              deploy_services
+              echo "Instance initialization completed at $(date)."
+          }
+
+          main
+
+Outputs:
+  InstanceId:
+    Description: Instance ID of the deployed EC2 instance.
+    Value: !Ref EC2Instance
+
+  PublicDNS:
+    Description: Public DNS of the deployed EC2 instance.
+    Value: !GetAtt EC2Instance.PublicDnsName
+
+  EC2PublicIP:
+    Description: Public IPv4 address of the EC2 instance
+    Value: !GetAtt EC2Instance.PublicIp
