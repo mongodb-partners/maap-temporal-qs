@@ -16,7 +16,7 @@
 
 ## 1. Overview
 
-The Event-Logger is a high-performance, asynchronous logging service designed to capture and store event logs for MAAP (Multi-Mission Algorithm and Analysis Platform) applications. It provides a robust solution for centralized logging with features such as buffered writes, MongoDB persistence, and local file backups.
+The Event-Logger is a high-performance, asynchronous logging service designed to capture and store event logs for applications. It provides a robust solution for centralized logging with features such as buffered writes, MongoDB persistence, and local file backups.
 
 Key features include:
 - Asynchronous log processing
