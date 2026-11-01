@@ -1,0 +1,18 @@
+---
+title: MongoDB + Temporal Durable AI Quickstart
+---
+flowchart LR
+User([Users]) --> Host["Host Service<br/>FastAPI and Gradio"]
+subgraph compose[Docker Compose on AWS EC2]
+Host --> Temporal["Temporal<br/>workflows and worker"]
+Temporal --> Mem["AI Memory Service"]
+Temporal --> Cache["Semantic Cache Service"]
+Temporal --> Loader["Data Loader Service"]
+Temporal --> Logger["Event Logger Service"]
+end
+Temporal --> Bedrock["Amazon Bedrock<br/>Claude and Titan models"]
+Temporal <--> Atlas[("MongoDB Atlas<br/>Vector Search")]
+Mem --> Atlas
+Cache --> Atlas
+Loader --> Atlas
+Logger --> Atlas
