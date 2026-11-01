@@ -67,6 +67,9 @@ Key features include:
 
 ## 2. Architecture
 
+![Architecture](docs/images/architecture.svg)
+
+
 The system architecture diagram for MAAP-Temporal:
 
 ```mermaid
